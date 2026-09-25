@@ -1,7 +1,5 @@
-import concurrent.futures
+import os
 import re
-from urllib.parse import quote, urlparse
-from duckduckgo_search import DDGS
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -16,75 +14,79 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+GOOGLE_API_KEY = "YOUR_GOOGLE_API_KEY_HERE"
+GOOGLE_CX = "YOUR_SEARCH_ENGINE_ID_HERE"
+
 
 class TargetRequest(BaseModel):
     target: str
 
 
-def resolve_company_to_domain(company_name: str) -> str:
-    """Uses Clearbit Autocomplete API to accurately convert raw company names to domains."""
-    raw_input = company_name.strip()
+def resolve_domain(company_name: str) -> str:
+    cleaned = re.sub(r"\(.*?\)", "", company_name).strip()
+    if "." in cleaned and " " not in cleaned:
+        return cleaned.lower()
 
-    # Return immediately if the user provided a direct domain
-    if "." in raw_input and " " not in raw_input and "(" not in raw_input:
-        return raw_input.lower()
-
-    # Clean legal suffixes and parentheticals
-    cleaned_name = re.sub(r"\(.*?\)", "", raw_input).strip()
-
-    # 1. Try Clearbit API (Fast & highly accurate)
     try:
-        api_url = f"https://autocomplete.clearbit.com/v1/companies/suggest?query={quote(cleaned_name)}"
-        res = requests.get(api_url, timeout=2)
-        if res.status_code == 200:
-            data = res.json()
-            if data and len(data) > 0:
-                domain = data[0].get("domain")
-                if domain:
-                    return domain.lower()
-    except Exception as e:
-        print(f"Clearbit API Lookup Error: {e}")
+        url = f"https://autocomplete.clearbit.com/v1/companies/suggest?query={requests.utils.quote(cleaned)}"
+        resp = requests.get(url, timeout=2)
+        if resp.status_code == 200 and resp.json():
+            return resp.json()[0]["domain"].lower()
+    except Exception:
+        pass
 
-    # 2. Hardcoded fallback rules for common edge cases
-    slug = re.sub(r"[^\w]", "", cleaned_name.lower())
-    suffixes = [
-        "inc",
-        "llc",
-        "corp",
-        "corporation",
-        "company",
-        "group",
-        "ltd",
-        "co",
-    ]
-    for s in suffixes:
-        if slug.endswith(s) and len(slug) > len(s):
-            slug = slug[: -len(s)]
-
+    slug = re.sub(r"[^\w]", "", cleaned.lower())
     return f"{slug}.com"
 
 
 @app.post("/scrape")
 def scrape_employee_leads(req: TargetRequest):
-    domain = resolve_company_to_domain(req.target)
-
-    # Standard departmental target patterns
-    fallback_depts = [
-        ("quality", "Quality Assurance", "QA Inbox"),
-        ("operations", "Operations", "Ops Inbox"),
-        ("safety", "Food Safety", "Safety Inbox"),
-    ]
+    domain = resolve_domain(req.target)
+    company_name = domain.split(".")[0]
+    roles = ["Quality", "Operations", "Safety"]
 
     discovered_leads = []
+    seen_emails = set()
 
-    for dept_prefix, dept_name, role_title in fallback_depts:
+    for role in roles:
+        query = f'site:linkedin.com/in/ "{company_name}" "{role}"'
+        url = f"https://www.googleapis.com/customsearch/v1?key={GOOGLE_API_KEY}&cx={GOOGLE_CX}&q={requests.utils.quote(query)}"
+
+        try:
+            res = requests.get(url, timeout=3)
+            if res.status_code == 200:
+                items = res.json().get("items", [])
+                for item in items:
+                    snippet = f"{item.get('title', '')} {item.get('snippet', '')}"
+                    names = re.findall(r"\b[A-Z][a-z]+\s[A-Z][a-z]+\b", snippet)
+
+                    for full_name in names:
+                        first, last = full_name.split(" ")[0], full_name.split(" ")[1]
+                        email_candidate = f"{first.lower()}.{last.lower()}@{domain}"
+
+                        if email_candidate not in seen_emails:
+                            seen_emails.add(email_candidate)
+                            discovered_leads.append(
+                                {
+                                    "email": email_candidate,
+                                    "first_name": first,
+                                    "last_name": last,
+                                    "position": f"{role} Specialist",
+                                    "source": "Google Official API",
+                                }
+                            )
+        except Exception as e:
+            print(f"API Error: {e}")
+
+    # Fallback pattern if API yields no names
+    if not discovered_leads:
         discovered_leads.append(
             {
-                "email": f"{dept_prefix}@{domain}",
-                "first_name": dept_name,
+                "email": f"quality@{domain}",
+                "first_name": "Quality Assurance",
                 "last_name": "Department",
-                "position": role_title,
-                "source": "Clearbit Domain Resolver",
+                "position": "QA Inbox",
+                "source": "Domain Pattern Generator",
             }
         )
 
