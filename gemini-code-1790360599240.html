@@ -1,0 +1,380 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Free Email Discovery Hub</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body class="bg-slate-50 text-slate-800 min-h-screen">
+  <div class="max-w-7xl mx-auto px-4 py-8">
+    
+    <!-- Header -->
+    <header class="mb-8 border-b pb-4 border-slate-200 flex flex-col md:flex-row md:items-center md:justify-between gap-4">
+      <div>
+        <h1 class="text-3xl font-bold text-slate-900">Email Discovery Hub</h1>
+        <p class="text-slate-500 text-sm mt-1">Extract operational leads and score job titles without third-party credit limits.</p>
+      </div>
+      <div class="flex items-center gap-3">
+        <button id="clearBtn" onclick="clearAllData()" class="px-3 py-2 text-sm font-medium text-rose-600 bg-rose-50 border border-rose-200 rounded-lg hover:bg-rose-100 transition hidden">
+          Clear History
+        </button>
+        <button id="exportBtn" onclick="exportToCSV()" class="px-4 py-2 text-sm font-medium text-white bg-emerald-600 rounded-lg hover:bg-emerald-700 transition shadow-sm disabled:opacity-50 disabled:cursor-not-allowed" disabled>
+          Export Master CSV (<span id="exportCount">0</span>)
+        </button>
+      </div>
+    </header>
+
+    <!-- Main Content Grid -->
+    <div class="grid grid-cols-1 lg:grid-cols-3 gap-8">
+      
+      <!-- Left Panel: Settings & Input -->
+      <div class="space-y-6">
+        <div class="bg-white p-6 rounded-xl border border-slate-200 shadow-sm space-y-4">
+          <h2 class="text-lg font-semibold text-slate-900 border-b pb-2">Free Search Setup</h2>
+          
+          <div>
+            <label class="block text-xs font-semibold uppercase tracking-wider text-slate-500 mb-1">Scraper Server URL</label>
+            <input type="text" id="serverUrlInput" value="http://localhost:8000/scrape" class="w-full px-3 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:outline-none text-sm font-mono" />
+            <p class="text-xs text-slate-400 mt-1">Local Python scraper endpoint (or leave default).</p>
+          </div>
+
+          <div>
+            <label class="block text-xs font-semibold uppercase tracking-wider text-slate-500 mb-1">Targets (Companies or Domains)</label>
+            <textarea id="targetList" rows="6" placeholder="marjacpoultry&#10;continentalmills&#10;target.com" class="w-full px-3 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:outline-none text-sm font-mono"></textarea>
+            <p class="text-xs text-slate-400 mt-1">Enter one domain or company name per line.</p>
+          </div>
+
+          <button id="searchBtn" onclick="runPipeline()" class="w-full py-2.5 bg-blue-600 text-white font-medium rounded-lg hover:bg-blue-700 transition shadow-sm text-sm">
+            Run Free Discovery & Append
+          </button>
+        </div>
+
+        <!-- Logic Rules Card -->
+        <div class="bg-slate-100 p-4 rounded-xl text-xs space-y-2 text-slate-600">
+          <p class="font-semibold text-slate-700">Filter, Priority & Match Rules:</p>
+          <ul class="list-disc pl-4 space-y-1">
+            <li><strong>Zero API Costs:</strong> Scrapes target websites directly using HTTP requests and pattern matching.</li>
+            <li><strong>Exact Match Audit:</strong> Flags off-target domain matches for manual review.</li>
+            <li><strong>Generic Exclusions:</strong> Drops <code class="bg-slate-200 px-1 rounded">info@</code>, <code class="bg-slate-200 px-1 rounded">support@</code>, etc.</li>
+            <li><strong>High Priority (+100/+90):</strong> Data Analyst, Nutrition Analyst, GDSN, Food Safety Director.</li>
+            <li><strong>Exec Penalty (-50):</strong> C-Level / VPs penalized unless no operational role exists.</li>
+          </ul>
+        </div>
+      </div>
+
+      <!-- Right Panel: Data Table & Progress -->
+      <div class="lg:col-span-2 space-y-4">
+        
+        <!-- Status Bar -->
+        <div id="statusCard" class="hidden p-4 rounded-xl border bg-blue-50 border-blue-200 text-blue-800 text-sm flex items-center justify-between">
+          <span id="statusText">Processing targets...</span>
+          <span id="statusCount" class="font-mono text-xs font-semibold bg-blue-100 px-2 py-1 rounded">0/0</span>
+        </div>
+
+        <!-- Table Container -->
+        <div class="bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden">
+          <div class="p-4 border-b border-slate-200 flex items-center justify-between">
+            <h2 class="text-base font-semibold text-slate-900">Email Discovery Master List</h2>
+            <span class="text-xs text-slate-500">Accumulated Total: <strong id="totalCount" class="text-slate-900">0</strong></span>
+          </div>
+
+          <div class="overflow-x-auto">
+            <table class="w-full text-left border-collapse text-sm">
+              <thead>
+                <tr class="bg-slate-50 border-b border-slate-200 text-xs text-slate-500 uppercase tracking-wider">
+                  <th class="py-3 px-4">Target / Company</th>
+                  <th class="py-3 px-4">Name</th>
+                  <th class="py-3 px-4">Job Title</th>
+                  <th class="py-3 px-4">Email</th>
+                  <th class="py-3 px-4">Score</th>
+                  <th class="py-3 px-4">Audit Match</th>
+                  <th class="py-3 px-4">Source</th>
+                </tr>
+              </thead>
+              <tbody id="leadTableBody" class="divide-y divide-slate-100">
+                <tr id="emptyRow">
+                  <td colspan="7" class="py-8 text-center text-slate-400 text-sm">No leads discovered yet. Run a search above.</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+
+      </div>
+    </div>
+  </div>
+
+  <script>
+    let masterLeads = [];
+    let seenEmails = new Set();
+
+    const GENERIC_PREFIXES = new Set([
+      "info", "support", "sales", "contact", "admin", "help", 
+      "general", "careers", "jobs", "billing", "service", "inquiries",
+      "office", "privacy", "marketing", "hello", "team"
+    ]);
+
+    const PREFERRED_KEYWORDS = [
+      { score: 100, words: ["data analyst", "nutrition analyst", "gdsn analyst", "gdsn"] },
+      { score: 90,  words: ["director of food safety", "food safety director", "food safety manager", "food safety"] },
+      { score: 80,  words: ["quality assurance manager", "qa manager", "quality assurance analyst", "qa analyst", "quality assurance", "fsqa"] },
+      { score: 70,  words: ["regulatory", "quality", "r&d", "compliance", "product", "analyst", "specialist", "coordinator", "manager"] }
+    ];
+
+    const EXECUTIVE_KEYWORDS = ["ceo", "chief", "cto", "cfo", "founder", "co-founder", "president", "vice president", "vp", "executive"];
+
+    function isGenericEmail(email) {
+      if (!email || !email.includes("@")) return true;
+      const prefix = email.split("@")[0].toLowerCase();
+      return GENERIC_PREFIXES.has(prefix);
+    }
+
+    function scoreJobTitle(title) {
+      if (!title) return 0;
+      const t = title.toLowerCase();
+      let score = 10;
+
+      for (const tier of PREFERRED_KEYWORDS) {
+        if (tier.words.some(w => t.includes(w))) {
+          score += tier.score;
+          break;
+        }
+      }
+
+      if (EXECUTIVE_KEYWORDS.some(e => t.includes(e))) {
+        score -= 50;
+      }
+
+      return score;
+    }
+
+    function verifyMatch(targetInput, email) {
+      if (!email || !email.includes("@")) {
+        return { match_status: "Manual Review Needed", matched_domain: "Invalid Email" };
+      }
+
+      const domain = email.split("@")[1].toLowerCase().trim();
+      const domainRoot = domain.split(".")[0];
+      const targetClean = targetInput.toLowerCase().trim().replace(/[^a-z0-9]/g, "");
+
+      if (targetInput.toLowerCase().includes(".") && domain === targetInput.toLowerCase()) {
+        return { match_status: "Exact Match", matched_domain: domain };
+      }
+
+      if (targetClean.length > 2 && (domainRoot.includes(targetClean) || targetClean.includes(domainRoot))) {
+        return { match_status: "Exact Match", matched_domain: domain };
+      }
+
+      return { match_status: "Manual Review Needed", matched_domain: domain };
+    }
+
+    async function runPipeline() {
+      const serverUrl = document.getElementById("serverUrlInput").value.trim();
+      const rawTargets = document.getElementById("targetList").value.trim();
+
+      const targets = rawTargets.split("\n").map(t => t.trim()).filter(t => t.length > 0);
+      if (targets.length === 0) {
+        alert("Please enter at least one company or domain name.");
+        return;
+      }
+
+      const statusCard = document.getElementById("statusCard");
+      const statusText = document.getElementById("statusText");
+      const statusCount = document.getElementById("statusCount");
+      const searchBtn = document.getElementById("searchBtn");
+
+      statusCard.classList.remove("hidden");
+      searchBtn.disabled = true;
+      searchBtn.classList.add("opacity-50");
+
+      let addedInThisRun = 0;
+      let skippedCount = 0;
+
+      for (let i = 0; i < targets.length; i++) {
+        const target = targets[i];
+        statusText.innerText = `Scrapes target '${target}'...`;
+        statusCount.innerText = `${i + 1}/${targets.length}`;
+
+        try {
+          // Call local free Python scraping worker
+          const res = await fetch(serverUrl, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ target: target })
+          });
+
+          if (res.ok) {
+            const data = await res.json();
+            const emails = data.results || [];
+
+            const validContacts = [];
+            for (const item of emails) {
+              const emailVal = item.email;
+              if (isGenericEmail(emailVal)) continue;
+
+              const title = item.position || "Discovered Contact";
+              const audit = verifyMatch(target, emailVal);
+
+              validContacts.push({
+                target_company: target,
+                first_name: item.first_name || "Unknown",
+                last_name: item.last_name || "Unknown",
+                job_title: title,
+                email: emailVal,
+                source: item.source || "Direct Web Scraping",
+                score: scoreJobTitle(title),
+                match_status: audit.match_status,
+                matched_domain: audit.matched_domain
+              });
+            }
+
+            if (validContacts.length > 0) {
+              validContacts.sort((a, b) => {
+                if (a.match_status === "Exact Match" && b.match_status !== "Exact Match") return -1;
+                if (b.match_status === "Exact Match" && a.match_status !== "Exact Match") return 1;
+                return b.score - a.score;
+              });
+
+              const bestMatch = validContacts[0];
+              const emailKey = bestMatch.email.toLowerCase();
+
+              if (!seenEmails.has(emailKey)) {
+                seenEmails.add(emailKey);
+                masterLeads.push(bestMatch);
+                addedInThisRun++;
+                appendLeadToTable(bestMatch);
+              }
+            } else {
+              skippedCount++;
+            }
+          }
+        } catch (err) {
+          console.error(`Error searching '${target}':`, err);
+        }
+
+        await new Promise(r => setTimeout(r, 100));
+      }
+
+      statusText.innerText = `Search complete! Discovered ${addedInThisRun} new lead(s). (${skippedCount} target(s) yielded no contacts).`;
+      searchBtn.disabled = false;
+      searchBtn.classList.remove("opacity-50");
+      updateUI();
+    }
+
+    function appendLeadToTable(lead) {
+      const tbody = document.getElementById("leadTableBody");
+      const emptyRow = document.getElementById("emptyRow");
+      if (emptyRow) emptyRow.remove();
+
+      let scoreBadgeClass = "bg-slate-100 text-slate-700 border-slate-200";
+      if (lead.score >= 80) {
+        scoreBadgeClass = "bg-emerald-50 text-emerald-700 border-emerald-200 font-bold";
+      } else if (lead.score < 0) {
+        scoreBadgeClass = "bg-rose-50 text-rose-700 border-rose-200";
+      }
+
+      let matchBadge = `
+        <span class="inline-flex items-center px-2 py-0.5 rounded text-xs font-semibold bg-emerald-50 text-emerald-700 border border-emerald-200">
+          Exact Match
+        </span>`;
+
+      if (lead.match_status !== "Exact Match") {
+        matchBadge = `
+          <div class="flex flex-col gap-0.5">
+            <span class="inline-flex items-center px-2 py-0.5 rounded text-xs font-semibold bg-amber-50 text-amber-700 border border-amber-200">
+              Manual Review Needed
+            </span>
+            <span class="text-[10px] text-slate-400 font-mono">No direct match (@${escapeHtml(lead.matched_domain)})</span>
+          </div>`;
+      }
+
+      const tr = document.createElement("tr");
+      tr.className = "hover:bg-slate-50 transition";
+      tr.innerHTML = `
+        <td class="py-3 px-4 font-mono text-xs text-slate-600">${escapeHtml(lead.target_company)}</td>
+        <td class="py-3 px-4 font-medium text-slate-900">${escapeHtml(lead.first_name)} ${escapeHtml(lead.last_name)}</td>
+        <td class="py-3 px-4 text-slate-600">${escapeHtml(lead.job_title)}</td>
+        <td class="py-3 px-4 font-mono text-xs text-blue-600">${escapeHtml(lead.email)}</td>
+        <td class="py-3 px-4">
+          <span class="inline-flex items-center px-2 py-0.5 rounded text-xs border ${scoreBadgeClass}">
+            ${lead.score}
+          </span>
+        </td>
+        <td class="py-3 px-4">${matchBadge}</td>
+        <td class="py-3 px-4">
+          <span class="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-slate-100 text-slate-700 border border-slate-200">
+            ${escapeHtml(lead.source)}
+          </span>
+        </td>
+      `;
+      tbody.appendChild(tr);
+    }
+
+    function updateUI() {
+      const count = masterLeads.length;
+      document.getElementById("totalCount").innerText = count;
+      document.getElementById("exportCount").innerText = count;
+
+      const exportBtn = document.getElementById("exportBtn");
+      const clearBtn = document.getElementById("clearBtn");
+
+      if (count > 0) {
+        exportBtn.disabled = false;
+        clearBtn.classList.remove("hidden");
+      } else {
+        exportBtn.disabled = true;
+        clearBtn.classList.add("hidden");
+      }
+    }
+
+    function clearAllData() {
+      if (confirm("Are you sure you want to clear all accumulated leads from this session?")) {
+        masterLeads = [];
+        seenEmails.clear();
+        document.getElementById("leadTableBody").innerHTML = `
+          <tr id="emptyRow">
+            <td colspan="7" class="py-8 text-center text-slate-400 text-sm">No leads discovered yet. Run a search above.</td>
+          </tr>
+        `;
+        document.getElementById("statusCard").classList.add("hidden");
+        updateUI();
+      }
+    }
+
+    function exportToCSV() {
+      if (masterLeads.length === 0) return;
+
+      const headers = ["target_company", "first_name", "last_name", "job_title", "email", "score", "match_status", "matched_domain", "source"];
+      let csvContent = "data:text/csv;charset=utf-8," + headers.join(",") + "\n";
+
+      masterLeads.forEach(lead => {
+        const row = [
+          `"${lead.target_company.replace(/"/g, '""')}"`,
+          `"${lead.first_name.replace(/"/g, '""')}"`,
+          `"${lead.last_name.replace(/"/g, '""')}"`,
+          `"${lead.job_title.replace(/"/g, '""')}"`,
+          `"${lead.email.replace(/"/g, '""')}"`,
+          `"${lead.score}"`,
+          `"${lead.match_status.replace(/"/g, '""')}"`,
+          `"${lead.matched_domain.replace(/"/g, '""')}"`,
+          `"${lead.source.replace(/"/g, '""')}"`
+        ];
+        csvContent += row.join(",") + "\n";
+      });
+
+      const encodedUri = encodeURI(csvContent);
+      const link = document.createElement("a");
+      link.setAttribute("href", encodedUri);
+      link.setAttribute("download", `email_discovery_leads_${new Date().toISOString().slice(0,10)}.csv`);
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+    }
+
+    function escapeHtml(str) {
+      return str ? str.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;") : "";
+    }
+  </script>
+</body>
+</html>
