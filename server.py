@@ -5,6 +5,7 @@ from duckduckgo_search import DDGS
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
+import requests
 
 app = FastAPI()
 
@@ -21,47 +22,41 @@ class TargetRequest(BaseModel):
 
 
 def resolve_company_to_domain(company_name: str) -> str:
-    """Converts inputs like 'Taylor Farms' or 'Brill (Formerly CSM...)' to 'taylorfarms.com'."""
+    """Uses Clearbit's free autocomplete API to turn company names into exact domains."""
     raw_input = company_name.strip()
 
-    # If user already typed a clean domain (e.g. "taylorfarms.com"), return it directly
+    # If already a domain format, return directly
     if "." in raw_input and " " not in raw_input and "(" not in raw_input:
         return raw_input.lower()
 
-    # Clean raw company text
+    # Clean parentheses and legal suffixes
     cleaned_name = re.sub(r"\(.*?\)", "", raw_input).strip()
 
+    # Query Clearbit's public company name suggestion API
     try:
-        # Search DuckDuckGo for official website link
-        with DDGS(timeout=3) as ddgs:
-            results = list(
-                ddgs.text(f'"{cleaned_name}" official website', max_results=2)
-            )
-            for res in results:
-                link = res.get("href", "")
-                parsed = urlparse(link)
-                domain = parsed.netloc.lower().replace("www.", "")
-
-                # Filter out search engines, social media, and directory sites
-                if domain and not any(
-                    x in domain
-                    for x in [
-                        "linkedin",
-                        "facebook",
-                        "wikipedia",
-                        "duckduckgo",
-                        "bloomberg",
-                        "dnb.com",
-                        "zoominfo",
-                    ]
-                ):
-                    return domain
+        url = f"https://autocomplete.clearbit.com/v1/companies/suggest?query={requests.utils.quote(cleaned_name)}"
+        resp = requests.get(url, timeout=3)
+        if resp.status_code == 200:
+            data = resp.json()
+            if data and len(data) > 0:
+                domain = data[0].get("domain")
+                if domain:
+                    return domain.lower()
     except Exception as e:
-        print(f"Domain Resolution Error: {e}")
+        print(f"Clearbit Lookup Error: {e}")
 
-    # Fallback slug generator if DDG resolution times out
+    # Fallback slug generator if API fails
     slug = re.sub(r"[^\w]", "", cleaned_name.lower())
-    suffixes = ["inc", "llc", "corp", "corporation", "company", "group", "ltd"]
+    suffixes = [
+        "inc",
+        "llc",
+        "corp",
+        "corporation",
+        "company",
+        "group",
+        "ltd",
+        "usa",
+    ]
     for s in suffixes:
         if slug.endswith(s) and len(slug) > len(s):
             slug = slug[: -len(s)]
@@ -80,7 +75,6 @@ def fetch_ddg_results(query: str):
 
 @app.post("/scrape")
 def scrape_employee_leads(req: TargetRequest):
-    # SECTION 2 INTEGRATION: Resolve company name input to an official clean domain
     domain = resolve_company_to_domain(req.target)
     company_name = domain.split(".")[0]
 
@@ -88,6 +82,7 @@ def scrape_employee_leads(req: TargetRequest):
     discovered_leads = []
     seen_emails = set()
 
+    # Words to ignore when parsing names from search snippets
     ignore_words = {
         "LinkedIn",
         "Profile",
@@ -116,6 +111,14 @@ def scrape_employee_leads(req: TargetRequest):
         "View",
         "About",
         "Contact",
+        "Japan",
+        "Spent",
+        "Retirement",
+        "Planning",
+        "Spanish",
+        "Translation",
+        "West",
+        "Haven",
     }
 
     for role in target_roles:
@@ -127,6 +130,12 @@ def scrape_employee_leads(req: TargetRequest):
                 results = future.result(timeout=3.5)
 
                 for res in results:
+                    link = res.get("href", "")
+
+                    # Verify result is an actual LinkedIn profile link
+                    if "linkedin.com/in/" not in link:
+                        continue
+
                     title_text = res.get("title", "")
                     snippet_text = res.get("body", "")
                     combined = f"{title_text} {snippet_text}"
@@ -163,7 +172,7 @@ def scrape_employee_leads(req: TargetRequest):
         except Exception as e:
             print(f"Search Execution Error: {e}")
 
-    # Fallback to clean, valid department emails if no individual names pass filters
+    # Fallback to clean, domain-matched department emails
     if not discovered_leads:
         fallback_depts = [
             ("quality", "Quality Assurance", "QA Inbox"),
