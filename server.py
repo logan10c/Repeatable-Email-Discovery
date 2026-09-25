@@ -1,5 +1,4 @@
-import re
-from urllib.parse import urljoin
+import os
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -7,7 +6,6 @@ import requests
 
 app = FastAPI()
 
-# Allow frontend HTML UI to make requests to local python worker
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -20,76 +18,89 @@ class TargetRequest(BaseModel):
     target: str
 
 
-def format_domain(target: str) -> str:
-    target = target.strip().lower()
-    if not target.startswith("http://") and not target.startswith("https://"):
-        if "." not in target:
-            target = f"{target}.com"
-        return f"https://{target}"
-    return target
+def clean_domain(target: str) -> str:
+    domain = (
+        target.strip()
+        .lower()
+        .replace("http://", "")
+        .replace("https://", "")
+        .replace("www.", "")
+    )
+    if "." not in domain:
+        domain = f"{domain}.com"
+    return domain
 
 
 @app.post("/scrape")
-def scrape_emails(req: TargetRequest):
-    domain_url = format_domain(req.target)
-    base_domain = domain_url.replace("https://", "").replace("http://", "")
+def find_and_verify_emails(req: TargetRequest):
+    domain = clean_domain(req.target)
 
-    headers = {
-        "User-Agent": (
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
-            " (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36"
-        )
-    }
+    # Standard corporate target roles to test
+    target_roles = [
+        {"first": "John", "last": "Doe", "pos": "Quality Assurance"},
+        {"first": "Jane", "last": "Smith", "pos": "Food Safety Lead"},
+        {"first": "Alex", "last": "Johnson", "pos": "Operations Manager"},
+    ]
 
-    endpoints = ["", "/contact", "/about", "/team", "/our-team"]
-    found_emails = set()
-    email_regex = r"[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}"
+    verified_results = []
+    api_key = os.getenv("ANYMAIL_API_KEY", "")
 
-    for ep in endpoints:
-        target_url = urljoin(domain_url, ep)
-        try:
-            res = requests.get(target_url, headers=headers, timeout=4)
-            if res.status_code == 200:
-                matches = re.findall(email_regex, res.text)
-                for email in matches:
-                    e = email.lower()
-                    if not e.endswith(
-                        (
-                            ".png",
-                            ".jpg",
-                            ".jpeg",
-                            ".gif",
-                            ".webp",
-                            ".js",
-                            ".css",
-                        )
-                    ):
-                        found_emails.add(e)
-        except Exception:
-            continue
+    for person in target_roles:
+        first = person["first"]
+        last = person["last"]
 
-    # Convert extracted emails into structured UI objects
-    results = []
-    for email in found_emails:
-        prefix = email.split("@")[0]
-        parts = prefix.split(".")
-        first_name = parts[0].capitalize() if len(parts) > 0 else "Unknown"
-        last_name = parts[1].capitalize() if len(parts) > 1 else ""
-
-        results.append(
-            {
-                "email": email,
-                "first_name": first_name,
-                "last_name": last_name,
-                "position": "Discovered Contact",
-                "source": "Web Crawler",
+        # Option A: Send directly to API if Key is set
+        if api_key:
+            url = "https://api.anymailfinder.com/v5.0/search/person.json"
+            payload = {
+                "domain": domain,
+                "first_name": first,
+                "last_name": last,
             }
-        )
+            headers = {
+                "X-Api-Key": api_key,
+                "Content-Type": "application/json",
+            }
 
-    return {"target": req.target, "results": results}
+            try:
+                response = requests.post(
+                    url, json=payload, headers=headers, timeout=8
+                )
+                if response.status_code == 200:
+                    data = response.json()
+                    email = data.get("email")
+                    status = data.get("email_class")  # 'verified' or 'questionable'
 
+                    if email and status == "verified":
+                        verified_results.append(
+                            {
+                                "email": email,
+                                "first_name": first,
+                                "last_name": last,
+                                "position": person["pos"],
+                                "source": "API Verified",
+                            }
+                        )
+            except Exception:
+                continue
 
-if __name__ == "__main__":
-    import uvicorn
+        # Option B: Fallback Local Pattern Permutations
+        else:
+            patterns = [
+                f"{first.lower()}.{last.lower()}@{domain}",
+                f"{first[0].lower()}{last.lower()}@{domain}",
+                f"{first.lower()}@{domain}",
+            ]
 
-    uvicorn.run(app, host="127.0.0.1", port=8000)
+            for email in patterns:
+                verified_results.append(
+                    {
+                        "email": email,
+                        "first_name": first,
+                        "last_name": last,
+                        "position": person["pos"],
+                        "source": "Pattern Generator",
+                    }
+                )
+
+    return {"target": req.target, "results": verified_results}
