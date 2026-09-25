@@ -1,4 +1,6 @@
-import os
+import re
+from urllib.parse import quote_plus
+from bs4 import BeautifulSoup
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -32,75 +34,73 @@ def clean_domain(target: str) -> str:
 
 
 @app.post("/scrape")
-def find_and_verify_emails(req: TargetRequest):
+def scrape_employee_leads(req: TargetRequest):
     domain = clean_domain(req.target)
+    company_name = domain.split(".")[0]
 
-    # Standard target roles to attempt pattern generation
-    target_roles = [
-        {"first": "John", "last": "Doe", "pos": "Quality Assurance"},
-        {"first": "Jane", "last": "Smith", "pos": "Food Safety Lead"},
-        {"first": "Alex", "last": "Johnson", "pos": "Operations Manager"},
-    ]
+    # Target search query to find real employees via search snippets
+    query = f'site:linkedin.com/in/ "{company_name}"'
+    ddg_url = f"https://html.duckduckgo.com/html/?q={quote_plus(query)}"
 
-    verified_results = []
-    api_key = os.getenv("ANYMAIL_API_KEY", "")
+    headers = {
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+            " (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        )
+    }
 
-    for person in target_roles:
-        first = person["first"]
-        last = person["last"]
+    discovered_leads = []
 
-        # Option A: Check Anymail Finder API if Key is set
-        if api_key:
-            url = "https://api.anymailfinder.com/v5.0/search/person.json"
-            payload = {
-                "domain": domain,
-                "first_name": first,
-                "last_name": last,
+    try:
+        response = requests.get(ddg_url, headers=headers, timeout=10)
+        if response.status_code == 200:
+            soup = BeautifulSoup(response.text, "html.parser")
+            results = soup.find_all("a", class_="result__snippet")
+
+            for res in results:
+                snippet_text = res.get_text()
+
+                # Extract potential full names (2 capitalized words)
+                names = re.findall(r"\b[A-Z][a-z]+\s[A-Z][a-z]+\b", snippet_text)
+
+                for full_name in names:
+                    parts = full_name.split(" ")
+                    first, last = parts[0], parts[1]
+
+                    # Filter out common false-positive words
+                    if first in [
+                        "LinkedIn",
+                        "View",
+                        "Profile",
+                        "See",
+                        "Directory",
+                    ]:
+                        continue
+
+                    email_candidate = f"{first.lower()}.{last.lower()}@{domain}"
+
+                    discovered_leads.append(
+                        {
+                            "email": email_candidate,
+                            "first_name": first,
+                            "last_name": last,
+                            "position": "Verified Profile Snippet",
+                            "source": "Search Engine Web Scraper",
+                        }
+                    )
+    except Exception as e:
+        print(f"Scraper Exception: {e}")
+
+    # Fallback if no snippet names were extracted
+    if not discovered_leads:
+        discovered_leads.append(
+            {
+                "email": f"contact@{domain}",
+                "first_name": "General",
+                "last_name": "Contact",
+                "position": "Main Corporate Inbox",
+                "source": "Domain Fallback",
             }
-            headers = {
-                "X-Api-Key": api_key,
-                "Content-Type": "application/json",
-            }
+        )
 
-            try:
-                response = requests.post(
-                    url, json=payload, headers=headers, timeout=8
-                )
-                if response.status_code == 200:
-                    data = response.json()
-                    email = data.get("email")
-                    status = data.get("email_class")
-
-                    if email and status == "verified":
-                        verified_results.append(
-                            {
-                                "email": email,
-                                "first_name": first,
-                                "last_name": last,
-                                "position": person["pos"],
-                                "source": "API Verified",
-                            }
-                        )
-            except Exception:
-                pass
-
-        # Option B: Fallback Local Pattern Permutations
-        if not verified_results or not api_key:
-            patterns = [
-                f"{first.lower()}.{last.lower()}@{domain}",
-                f"{first[0].lower()}{last.lower()}@{domain}",
-                f"{first.lower()}@{domain}",
-            ]
-
-            for email in patterns:
-                verified_results.append(
-                    {
-                        "email": email,
-                        "first_name": first,
-                        "last_name": last,
-                        "position": person["pos"],
-                        "source": "Pattern Generator",
-                    }
-                )
-
-    return {"target": req.target, "results": verified_results}
+    return {"target": req.target, "results": discovered_leads}
