@@ -14,8 +14,8 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-GOOGLE_API_KEY = "YOUR_GOOGLE_API_KEY_HERE"
-GOOGLE_CX = "YOUR_SEARCH_ENGINE_ID_HERE"
+GOOGLE_API_KEY = "AIzaSyD02UwigOMvHpaUSIL5rqhUQ8SrSIh0bGc"
+GOOGLE_CX = "523cc902190574994"
 
 
 class TargetRequest(BaseModel):
